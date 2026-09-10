@@ -11,7 +11,7 @@ final class AppModel: ObservableObject {
     @Published var entries: [IPAEntry] = []
     @Published var errorMessage: String?
     @Published var isLoading = false
-    /// 导入流程诊断信息（用于定位"无反应"问题卡在哪一步）
+    /// 导入流程诊断信息（用于定位"无反应/闪退"问题卡在哪一步）
     @Published var importDiag: String = "等待操作"
 
     /// 已修改的 dylib 数据缓存：zipPath -> modifiedData
@@ -25,9 +25,10 @@ final class AppModel: ObservableObject {
         self.errorMessage = nil
         self.isLoading = true
         self.importDiag = "正在解析 IPA（\(data.count) 字节）..."
+        let dataCopy = data
         Task.detached(priority: .userInitiated) {
             do {
-                let parser = try IPAParser(data: data)
+                let parser = try IPAParser(data: dataCopy)
                 let list = try parser.listMachOEntries()
                 await MainActor.run {
                     self.entries = list.sorted { $0.zipPath < $1.zipPath }
@@ -71,28 +72,41 @@ enum ExportError: Error, LocalizedError {
     var errorDescription: String? { "尚未加载 IPA" }
 }
 
-// MARK: - Document Picker Coordinator（UIKit delegate，绕过 SwiftUI fileImporter）
+// MARK: - DocumentPicker（UIViewControllerRepresentable 标准包装，让 SwiftUI 管理生命周期）
 
-private class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
+struct DocumentPicker: UIViewControllerRepresentable {
+    let contentTypes: [UTType]
     let onPick: (URL) -> Void
     let onCancel: () -> Void
 
-    init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
-        self.onPick = onPick
-        self.onCancel = onCancel
-        super.init()
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPick: onPick, onCancel: onCancel)
     }
 
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        if let url = urls.first {
-            onPick(url)
-        } else {
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: true)
+        picker.delegate = context.coordinator
+        picker.allowsMultipleSelection = false
+        picker.modalPresentationStyle = .formSheet
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        let onCancel: () -> Void
+        init(onPick: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onPick = onPick
+            self.onCancel = onCancel
+            super.init()
+        }
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first { onPick(url) } else { onCancel() }
+        }
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
             onCancel()
         }
-    }
-
-    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        onCancel()
     }
 }
 
@@ -100,10 +114,9 @@ private class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
 
 struct ContentView: View {
     @EnvironmentObject var appModel: AppModel
+    @State private var showPicker = false
     @State private var showExporter = false
     @State private var searchText = ""
-    /// 持有 coordinator 强引用，避免 delegate 被提前释放导致回调丢失
-    @State private var pickerCoordinator: DocumentPickerCoordinator?
 
     var filteredEntries: [IPAEntry] {
         guard !searchText.isEmpty else { return appModel.entries }
@@ -119,7 +132,8 @@ struct ContentView: View {
                 // 顶部操作栏
                 HStack {
                     Button {
-                        presentDocumentPicker()
+                        appModel.importDiag = "按钮已点击，准备弹选择器..."
+                        showPicker = true
                     } label: {
                         Label("导入 IPA", systemImage: "square.and.arrow.down")
                     }
@@ -138,7 +152,7 @@ struct ContentView: View {
                 }
                 .padding()
 
-                // 诊断信息（红字显示，用于定位"无反应"问题卡在哪一步）
+                // 诊断信息（红字显示，用于定位"无反应/闪退"问题卡在哪一步）
                 Text("诊断: \(appModel.importDiag)")
                     .font(.caption2)
                     .foregroundColor(.red)
@@ -197,6 +211,23 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Dylib 字符串编辑器")
+            .sheet(isPresented: $showPicker) {
+                DocumentPicker(
+                    contentTypes: [
+                        UTType("com.apple.itunes.ipa") ?? .archive,
+                        .archive,
+                        .zip,
+                        .data,
+                        .item
+                    ],
+                    onPick: { url in
+                        handlePickedURL(url)
+                    },
+                    onCancel: {
+                        appModel.importDiag = "用户取消了选择"
+                    }
+                )
+            }
             .alert("错误", isPresented: Binding(
                 get: { appModel.errorMessage != nil },
                 set: { if !$0 { appModel.errorMessage = nil } }
@@ -224,71 +255,27 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - 直接 present UIDocumentPickerViewController（绕过 SwiftUI fileImporter）
-
-    private func presentDocumentPicker() {
-        appModel.importDiag = "按钮已点击，正在弹出选择器..."
-
-        guard let window = UIApplication.shared.connectedScenes
-            .compactMap({ ($0 as? UIWindowScene)?.windows.first }).first,
-              let rootVC = window.rootViewController else {
-            appModel.importDiag = "错误：无法获取 rootVC"
-            return
-        }
-
-        // 找到最顶层 presented VC，避免 present 失败
-        var topVC = rootVC
-        while let presented = topVC.presentedViewController {
-            topVC = presented
-        }
-
-        // 用最宽松的 UTI 列表，确保 .ipa 可选
-        let types: [UTType] = [
-            UTType("com.apple.itunes.ipa") ?? .archive,
-            .archive,
-            .zip,
-            .data,
-            .item
-        ]
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
-        picker.allowsMultipleSelection = false
-        picker.modalPresentationStyle = .formSheet
-
-        let coordinator = DocumentPickerCoordinator(
-            onPick: { url in
-                DispatchQueue.main.async {
-                    handlePickedURL(url)
-                }
-            },
-            onCancel: {
-                DispatchQueue.main.async {
-                    appModel.importDiag = "用户取消了选择"
-                }
-            }
-        )
-        picker.delegate = coordinator
-        // 强引用持有，防止回调前被释放
-        pickerCoordinator = coordinator
-
-        topVC.present(picker, animated: true) {
-            appModel.importDiag = "选择器已弹出，等待选择文件..."
-        }
-    }
+    // MARK: - 处理选中文件（异步读取避免主线程阻塞/闪退）
 
     private func handlePickedURL(_ url: URL) {
-        appModel.importDiag = "已选择文件: \(url.lastPathComponent)，正在读取..."
-        // asCopy=true 时系统会把文件拷到 tmp，startAccessing 通常返回 true
-        let didStart = url.startAccessingSecurityScopedResource()
-        defer {
-            if didStart { url.stopAccessingSecurityScopedResource() }
-        }
-        do {
-            let data = try Data(contentsOf: url)
-            appModel.importDiag = "读取成功：\(data.count) 字节，开始解析..."
-            appModel.loadIPA(data, fileName: url.lastPathComponent)
-        } catch {
-            appModel.importDiag = "读取失败: \(error.localizedDescription)"
-            appModel.errorMessage = "读取文件失败：\(error.localizedDescription)"
+        appModel.importDiag = "已选文件: \(url.lastPathComponent)，开始后台读取..."
+        // 拷贝 URL 字符串，避免跨线程访问 URL 安全作用域问题
+        let path = url.path
+        let displayName = url.lastPathComponent
+        Task.detached(priority: .userInitiated) {
+            do {
+                let fileURL = URL(fileURLWithPath: path)
+                let data = try Data(contentsOf: fileURL, options: [.uncached])
+                await MainActor.run {
+                    appModel.importDiag = "读取成功：\(data.count) 字节，开始解析..."
+                    appModel.loadIPA(data, fileName: displayName)
+                }
+            } catch {
+                await MainActor.run {
+                    appModel.importDiag = "读取失败: \(error.localizedDescription)"
+                    appModel.errorMessage = "读取文件失败：\(error.localizedDescription)"
+                }
+            }
         }
     }
 
