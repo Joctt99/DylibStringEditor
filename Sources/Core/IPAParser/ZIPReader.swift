@@ -138,7 +138,7 @@ public struct ZIPReader {
             src_size: 0,
             state: nil
         )
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR else {
+        guard compression_stream_init(&stream, .decode, .zlib) != .error else {
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
@@ -156,9 +156,9 @@ public struct ZIPReader {
                 guard let outBase = outRaw.bindMemory(to: UInt8.self).baseAddress else { return false }
                 stream.dst_ptr = outBase
                 stream.dst_size = outRaw.count
-                let op = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINAL))
+                let op = compression_stream_process(&stream, .final)
                 produced = outRaw.count - stream.dst_size
-                return op == COMPRESSION_STATUS_END
+                return op == .end
             }
         }
         if !ok {
@@ -177,7 +177,7 @@ public struct ZIPReader {
             src_size: 0,
             state: nil
         )
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) != COMPRESSION_STATUS_ERROR else {
+        guard compression_stream_init(&stream, .decode, .zlib) != .error else {
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
@@ -209,12 +209,12 @@ public struct ZIPReader {
                         // 需要扩容
                         return
                     }
-                    let op = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINAL))
+                    let op = compression_stream_process(&stream, .final)
                     produced = outRaw.count - stream.dst_size
                     switch op {
-                    case COMPRESSION_STATUS_END: done = true
-                    case COMPRESSION_STATUS_ERROR: error = true
-                    case COMPRESSION_STATUS_OK:
+                    case .end: done = true
+                    case .error: error = true
+                    case .ok:
                         if stream.dst_size == 0 {
                             // buffer 满，外层循环会扩容
                         }
