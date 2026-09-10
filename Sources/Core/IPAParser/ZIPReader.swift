@@ -167,12 +167,12 @@ public struct ZIPReader {
     static func inflateRawDeflate(_ src: Data, expectedSize: Int, filename: String) throws -> Data {
         AppLog.shared.write("inflateRawDeflate 开始: filename=\(filename), srcSize=\(src.count), expectedSize=\(expectedSize)")
 
-        // 修复: 用 nil 初始化指针字段，不再用 UnsafeMutablePointer(bitPattern: 0)! 强制解包
-        // (UnsafePointer(bitPattern: 0) 返回 nil，! 解包 nil 会崩溃)
+        // 修复: bitPattern 0 返回 nil，! 解包 nil 会崩溃。用 bitPattern 1 创建非 nil 哨兵指针，
+        // 这些指针在使用前会被 withUnsafeBytes 的真实指针覆盖，不会被解引用。
         var stream = compression_stream(
-            dst_ptr: nil,
+            dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 1)!,
             dst_size: 0,
-            src_ptr: nil,
+            src_ptr: UnsafePointer<UInt8>(bitPattern: 1)!,
             src_size: 0,
             state: nil
         )
@@ -210,9 +210,9 @@ public struct ZIPReader {
     /// 扩容式解压：当一次性解压不够 buffer 时使用
     private static func inflateWithGrowingBuffer(src: Data, initialSize: Int, filename: String) throws -> Data {
         var stream = compression_stream(
-            dst_ptr: nil,
+            dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 1)!,
             dst_size: 0,
-            src_ptr: nil,
+            src_ptr: UnsafePointer<UInt8>(bitPattern: 1)!,
             src_size: 0,
             state: nil
         )
