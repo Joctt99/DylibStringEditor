@@ -145,7 +145,7 @@ public struct ZIPReader {
 
         // 用 expected size 预分配；ZIP 里的 uncompressed size 字段总是可信的，所以一次就够
         // 保险起见给 2 倍空间
-        var output = Data(count: max(expectedSize * 2, 64))
+        var output = Data(count: Swift.max(expectedSize * 2, 64))
         var produced = 0
 
         let ok: Bool = src.withUnsafeBytes { (srcRaw: UnsafeRawBufferPointer) -> Bool in
@@ -163,7 +163,7 @@ public struct ZIPReader {
         }
         if !ok {
             // 预分配不够，走扩容路径
-            return try inflateWithGrowingBuffer(src: src, initialSize: max(expectedSize, 64), filename: filename)
+            return try inflateWithGrowingBuffer(src: src, initialSize: Swift.max(expectedSize, 64), filename: filename)
         }
         return output.prefix(produced)
     }
