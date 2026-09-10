@@ -66,7 +66,7 @@ internal extension Data {
     func readCString(at offset: Int, maxLength: Int) -> String? {
         guard offset >= 0, offset < count else { return nil }
         var end = offset
-        while end < min(offset + maxLength, count), self[end] != 0 {
+        while end < Swift.min(offset + maxLength, count), self[end] != 0 {
             end += 1
         }
         let raw = subdata(in: offset..<end)
