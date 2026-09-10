@@ -241,8 +241,8 @@ internal struct MachOBinary {
                         sizeOff = secCursor + 36
                         offOff = secCursor + 40
                     }
-                    guard let secSize = segIs64 ? data.readUInt64LE(at: sizeOff) : data.readUInt32LE(at: sizeOff),
-                          let secOff = segIs64 ? data.readUInt64LE(at: offOff) : data.readUInt32LE(at: offOff) else {
+                    guard let secSize = (segIs64 ? data.readUInt64LE(at: sizeOff) : data.readUInt32LE(at: sizeOff).map(UInt64.init)),
+                          let secOff = (segIs64 ? data.readUInt64LE(at: offOff) : data.readUInt32LE(at: offOff).map(UInt64.init)) else {
                         throw MachOStringEditorError.malformedLoadCommand(index: -1)
                     }
                     if let enc = MachOStringEncoding.detect(forSegment: sectSegName, section: sectName) {
