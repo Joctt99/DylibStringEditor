@@ -59,7 +59,7 @@ public enum MachOStringEncoding: Equatable {
 
 // MARK: - 对外类型
 
-public struct MachOString: Equatable {
+public struct MachOString: Equatable, Identifiable {
     public let segment: String
     public let section: String
     public let sliceIndex: Int
@@ -68,6 +68,8 @@ public struct MachOString: Equatable {
     public let byteLength: Int      // 不含结尾 null
     public let encoding: MachOStringEncoding
     public let value: String
+    /// Identifiable：用 sliceIndex + fileOffset 组合作为唯一 id
+    public var id: String { "\(sliceIndex)_\(fileOffset)" }
 }
 
 public struct MachOReplacement: Equatable {
