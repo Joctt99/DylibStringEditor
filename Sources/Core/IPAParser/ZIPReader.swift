@@ -1,6 +1,14 @@
 import Foundation
 import Compression
 
+// Compression framework 常量（Swift 未映射为枚举成员，用原始值）
+private let CS_OP_DECODE = Int32(1)       // COMPRESSION_STREAM_DECODE
+private let CS_ALGO_ZLIB = Int32(200)     // COMPRESSION_ZLIB
+private let CS_STATUS_ERROR = Int32(-1)   // COMPRESSION_STATUS_ERROR
+private let CS_STATUS_END = Int32(1)      // COMPRESSION_STATUS_END
+private let CS_STATUS_OK = Int32(0)       // COMPRESSION_STATUS_OK
+private let CS_FLAG_FINAL = Int32(1)      // COMPRESSION_STREAM_FINAL
+
 // MARK: - ZIP 容器最小解析器
 //
 // 仅支持：
@@ -138,7 +146,7 @@ public struct ZIPReader {
             src_size: 0,
             state: nil
         )
-        guard compression_stream_init(&stream, .decode, .zlib) != .error else {
+        guard compression_stream_init(&stream, CS_OP_DECODE, CS_ALGO_ZLIB) != CS_STATUS_ERROR else {
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
@@ -156,9 +164,9 @@ public struct ZIPReader {
                 guard let outBase = outRaw.bindMemory(to: UInt8.self).baseAddress else { return false }
                 stream.dst_ptr = outBase
                 stream.dst_size = outRaw.count
-                let op = compression_stream_process(&stream, .final)
+                let op = compression_stream_process(&stream, CS_FLAG_FINAL)
                 produced = outRaw.count - stream.dst_size
-                return op == .end
+                return op == CS_STATUS_END
             }
         }
         if !ok {
@@ -177,7 +185,7 @@ public struct ZIPReader {
             src_size: 0,
             state: nil
         )
-        guard compression_stream_init(&stream, .decode, .zlib) != .error else {
+        guard compression_stream_init(&stream, CS_OP_DECODE, CS_ALGO_ZLIB) != CS_STATUS_ERROR else {
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
@@ -209,12 +217,12 @@ public struct ZIPReader {
                         // 需要扩容
                         return
                     }
-                    let op = compression_stream_process(&stream, .final)
+                    let op = compression_stream_process(&stream, CS_FLAG_FINAL)
                     produced = outRaw.count - stream.dst_size
                     switch op {
-                    case .end: done = true
-                    case .error: error = true
-                    case .ok:
+                    case CS_STATUS_END: done = true
+                    case CS_STATUS_ERROR: error = true
+                    case CS_STATUS_OK:
                         if stream.dst_size == 0 {
                             // buffer 满，外层循环会扩容
                         }
