@@ -25,6 +25,72 @@ struct IPAExporter {
         }
         return writer.makeData()
     }
+
+    /// 注入 dylib 到 IPA
+    /// - Parameters:
+    ///   - original: 原始 IPA 数据
+    ///   - injectedDylibs: 要注入的 dylib 列表，key 为 dylib 文件名（如 "Plugin.dylib"），value 为 dylib 数据
+    /// - Returns: 注入后的 IPA 数据
+    static func buildIPAWithInjectedDylibs(original: Data, injectedDylibs: [String: Data]) throws -> Data {
+        AppLog.shared.write("IPAExporter.buildIPAWithInjectedDylibs: \(injectedDylibs.count) 个 dylib")
+        let zip = try ZIPReader(data: original)
+        let entries = try zip.listEntries()
+
+        // 找到主二进制（Payload/X.app/X）
+        var mainBinaryEntry: ZIPEntry?
+        var appDir: String?
+        for entry in entries {
+            let components = entry.filename.split(separator: "/")
+            if components.count >= 2,
+               components[0] == "Payload",
+               components[1].hasSuffix(".app") {
+                let appName = components[1].replacingOccurrences(of: ".app", with: "")
+                if components.count == 3 && components[2] == appName {
+                    mainBinaryEntry = entry
+                    appDir = "Payload/\(components[1])"
+                    AppLog.shared.write("  找到主二进制: \(entry.filename)")
+                    break
+                }
+            }
+        }
+
+        guard let mainEntry = mainBinaryEntry, let appDir = appDir else {
+            AppLog.shared.write("  未找到主二进制")
+            throw NSError(domain: "IPAExporter", code: 1, userInfo: [NSLocalizedDescriptionKey: "未找到主二进制"])
+        }
+
+        // 读取主二进制数据
+        var mainBinaryData = try zip.readData(for: mainEntry)
+
+        // 对每个要注入的 dylib：
+        // 1. 添加 LC_LOAD_DYLIB 到主二进制
+        // 2. 将 dylib 文件添加到 .app 目录
+        let injector = MachOInjector()
+        for (dylibName, dylibData) in injectedDylibs {
+            let dylibPath = "@executable_path/\(dylibName)"
+            AppLog.shared.write("  注入 dylib: \(dylibName) -> \(dylibPath)")
+            mainBinaryData = try injector.injectDylib(data: mainBinaryData, dylibPath: dylibPath)
+        }
+
+        // 重新打包：主二进制用修改后的数据，其他原样，追加新 dylib
+        var writer = ZIPWriter()
+        for entry in entries {
+            if entry.filename == mainEntry.filename {
+                try writer.addFile(filename: entry.filename, data: mainBinaryData)
+            } else {
+                let data = try zip.readData(for: entry)
+                try writer.addFile(filename: entry.filename, data: data)
+            }
+        }
+        // 追加注入的 dylib 到 .app 目录
+        for (dylibName, dylibData) in injectedDylibs {
+            let zipPath = "\(appDir)/\(dylibName)"
+            AppLog.shared.write("  添加 dylib 到 IPA: \(zipPath)")
+            try writer.addFile(filename: zipPath, data: dylibData)
+        }
+
+        return writer.makeData()
+    }
 }
 
 // MARK: - ZIP 打包器（stored 方式，不压缩）

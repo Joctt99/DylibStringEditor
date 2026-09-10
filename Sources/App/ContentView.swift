@@ -13,9 +13,18 @@ final class AppModel: ObservableObject {
     @Published var isLoading = false
     /// 导入流程诊断信息（用于定位"无反应/闪退"问题卡在哪一步）
     @Published var importDiag: String = "等待操作"
+    /// 已加载的待注入 dylib 列表
+    @Published var injectedDylibs: [InjectedDylib] = []
 
     /// 已修改的 dylib 数据缓存：zipPath -> modifiedData
     private(set) var modifiedDylibs: [String: Data] = [:]
+
+    /// 待注入的 dylib
+    struct InjectedDylib: Identifiable {
+        let id = UUID()
+        let name: String
+        let data: Data
+    }
 
     func loadIPA(_ data: Data, fileName: String) {
         self.ipaData = data
@@ -70,11 +79,51 @@ final class AppModel: ObservableObject {
         guard let original = ipaData else { throw ExportError.noIPALoaded }
         return try IPAExporter.buildModifiedIPA(original: original, modifiedDylibs: modifiedDylibs)
     }
+
+    /// 添加待注入的 dylib
+    func addInjectedDylib(name: String, data: Data) {
+        // 去重：如果同名已存在则替换
+        injectedDylibs.removeAll { $0.name == name }
+        injectedDylibs.append(InjectedDylib(name: name, data: data))
+        AppLog.shared.write("addInjectedDylib: \(name), size=\(data.count)")
+    }
+
+    /// 移除待注入的 dylib
+    func removeInjectedDylib(_ dylib: InjectedDylib) {
+        injectedDylibs.removeAll { $0.id == dylib.id }
+    }
+
+    /// 构建注入了 dylib 的 IPA（同时保留已修改的 dylib）
+    func buildInjectedIPA() throws -> Data {
+        guard let original = ipaData else { throw ExportError.noIPALoaded }
+        guard !injectedDylibs.isEmpty else { throw ExportError.noDylibToInject }
+
+        // 先构建修改后的 IPA（替换已修改的 dylib）
+        let modifiedIPA: Data
+        if !modifiedDylibs.isEmpty {
+            modifiedIPA = try IPAExporter.buildModifiedIPA(original: original, modifiedDylibs: modifiedDylibs)
+        } else {
+            modifiedIPA = original
+        }
+
+        // 再注入 dylib
+        var dylibDict: [String: Data] = [:]
+        for d in injectedDylibs {
+            dylibDict[d.name] = d.data
+        }
+        return try IPAExporter.buildIPAWithInjectedDylibs(original: modifiedIPA, injectedDylibs: dylibDict)
+    }
 }
 
 enum ExportError: Error, LocalizedError {
     case noIPALoaded
-    var errorDescription: String? { "尚未加载 IPA" }
+    case noDylibToInject
+    var errorDescription: String? {
+        switch self {
+        case .noIPALoaded: return "尚未加载 IPA"
+        case .noDylibToInject: return "请先导入要注入的 dylib"
+        }
+    }
 }
 
 // MARK: - DocumentPicker（UIViewControllerRepresentable 标准包装，让 SwiftUI 管理生命周期）
@@ -120,6 +169,7 @@ struct DocumentPicker: UIViewControllerRepresentable {
 struct ContentView: View {
     @EnvironmentObject var appModel: AppModel
     @State private var showPicker = false
+    @State private var showDylibPicker = false
     @State private var showExporter = false
     @State private var searchText = ""
 
@@ -135,7 +185,7 @@ struct ContentView: View {
         NavigationView {
             VStack(spacing: 0) {
                 // 顶部操作栏
-                HStack {
+                HStack(spacing: 8) {
                     Button {
                         appModel.importDiag = "按钮已点击，准备弹选择器..."
                         showPicker = true
@@ -144,13 +194,35 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
+                    if appModel.ipaData != nil {
+                        Button {
+                            showDylibPicker = true
+                        } label: {
+                            Label("导入 dylib", systemImage: "puzzlepiece.extension")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
                     Spacer()
 
-                    if !appModel.entries.isEmpty {
-                        Button {
-                            Task { await exportIPA() }
+                    if !appModel.entries.isEmpty || !appModel.injectedDylibs.isEmpty {
+                        Menu {
+                            if !appModel.entries.isEmpty {
+                                Button {
+                                    Task { await exportModifiedIPA() }
+                                } label: {
+                                    Label("导出修改后 IPA", systemImage: "square.and.arrow.up")
+                                }
+                            }
+                            if !appModel.injectedDylibs.isEmpty {
+                                Button {
+                                    Task { await exportInjectedIPA() }
+                                } label: {
+                                    Label("导出注入后 IPA", systemImage: "syringe")
+                                }
+                            }
                         } label: {
-                            Label("导出 IPA", systemImage: "square.and.arrow.up")
+                            Label("导出", systemImage: "square.and.arrow.up")
                         }
                         .buttonStyle(.bordered)
                     }
@@ -177,6 +249,36 @@ struct ContentView: View {
                             Text("已修改 \(appModel.modifiedEntries.count) 个")
                                 .font(.caption)
                                 .foregroundColor(.orange)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
+                }
+
+                // 已注入的 dylib 列表
+                if !appModel.injectedDylibs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("待注入 dylib（\(appModel.injectedDylibs.count)）")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ForEach(appModel.injectedDylibs) { dylib in
+                            HStack {
+                                Image(systemName: "puzzlepiece.extension")
+                                    .foregroundColor(.purple)
+                                Text(dylib.name)
+                                    .font(.caption)
+                                Text("\(dylib.data.count) B")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button {
+                                    appModel.removeInjectedDylib(dylib)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     .padding(.horizontal)
@@ -231,6 +333,18 @@ struct ContentView: View {
                     onCancel: {
                         appModel.importDiag = "用户取消了选择"
                     }
+                )
+            }
+            .sheet(isPresented: $showDylibPicker) {
+                DocumentPicker(
+                    contentTypes: [
+                        .data,
+                        .item
+                    ],
+                    onPick: { url in
+                        handlePickedDylib(url)
+                    },
+                    onCancel: {}
                 )
             }
             .alert("错误", isPresented: Binding(
@@ -288,25 +402,69 @@ struct ContentView: View {
     }
 
     private func exportIPA() async {
+        await exportModifiedIPA()
+    }
+
+    /// 处理选中的 dylib 文件
+    private func handlePickedDylib(_ url: URL) {
+        let path = url.path
+        let name = url.lastPathComponent
+        AppLog.shared.write("handlePickedDylib: name=\(name), path=\(path)")
+        Task.detached(priority: .userInitiated) {
+            do {
+                let fileURL = URL(fileURLWithPath: path)
+                let data = try Data(contentsOf: fileURL, options: [.uncached])
+                await MainActor.run {
+                    appModel.addInjectedDylib(name: name, data: data)
+                    appModel.importDiag = "已添加待注入 dylib: \(name) (\(data.count) 字节)"
+                }
+            } catch {
+                AppLog.shared.write("dylib 读取失败: \(error.localizedDescription)")
+                await MainActor.run {
+                    appModel.errorMessage = "读取 dylib 失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// 导出修改后 IPA（替换已修改的 dylib）
+    private func exportModifiedIPA() async {
         do {
             let data = try appModel.buildModifiedIPA()
-            // 保存到 temp 并分享
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("modified_\(appModel.ipaFileName ?? "app.ipa")")
-            try data.write(to: tempURL)
-            // 用分享面板
-            if let window = UIApplication.shared.connectedScenes
-                .compactMap({ ($0 as? UIWindowScene)?.windows.first }).first,
-               let rootVC = window.rootViewController {
-                let avc = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-                if let popover = avc.popoverPresentationController {
-                    popover.sourceView = rootVC.view
-                    popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
-                }
-                rootVC.present(avc, animated: true)
-            }
+            try shareIPA(data: data, suffix: "modified")
         } catch {
             appModel.errorMessage = "导出失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 导出注入后 IPA（注入 dylib 到主二进制）
+    private func exportInjectedIPA() async {
+        do {
+            appModel.importDiag = "正在注入 dylib 并打包..."
+            let data = try appModel.buildInjectedIPA()
+            AppLog.shared.write("注入打包成功: \(data.count) 字节")
+            appModel.importDiag = "注入打包成功"
+            try shareIPA(data: data, suffix: "injected")
+        } catch {
+            AppLog.shared.write("注入导出失败: \(error.localizedDescription)")
+            appModel.errorMessage = "注入导出失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 分享 IPA
+    private func shareIPA(data: Data, suffix: String) throws {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suffix)_\(appModel.ipaFileName ?? "app.ipa")")
+        try data.write(to: tempURL)
+        if let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.windows.first }).first,
+           let rootVC = window.rootViewController {
+            let avc = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
+            if let popover = avc.popoverPresentationController {
+                popover.sourceView = rootVC.view
+                popover.sourceRect = CGRect(x: rootVC.view.bounds.midX, y: rootVC.view.bounds.midY, width: 0, height: 0)
+            }
+            rootVC.present(avc, animated: true)
         }
     }
 }
