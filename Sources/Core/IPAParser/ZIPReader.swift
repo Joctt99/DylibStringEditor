@@ -9,7 +9,7 @@ private let CS_STATUS_END = compression_status(rawValue: 1)               // COM
 private let CS_STATUS_OK = compression_status(rawValue: 0)                // COMPRESSION_STATUS_OK
 private let CS_FLAG_FINAL = Int32(1)                                      // COMPRESSION_STREAM_FINAL
 
-// MARK: - 持久化日志（写入 Documents/dylib_editor.log，可通过 Files app 查看）
+// MARK: - 持久化日志
 
 public final class AppLog {
     public static let shared = AppLog()
@@ -45,7 +45,7 @@ public final class AppLog {
     public var logFilePath: String { logURL.path }
 }
 
-// MARK: - ZIP 容器最小解析器
+// MARK: - ZIP 容器解析器
 
 public enum ZIPReaderError: Error, CustomStringConvertible {
     case notZIP
@@ -54,60 +54,99 @@ public enum ZIPReaderError: Error, CustomStringConvertible {
     case unsupportedDataDescriptor(filename: String)
     case inflateFailed(filename: String)
     case crcMismatch(filename: String, expected: UInt32, actual: UInt32)
+    case centralDirectoryNotFound
+    case noLocalFileHeader(filename: String)
 
     public var description: String {
         switch self {
-        case .notZIP: return "输入数据不是 ZIP 文件（未找到 local file header）"
+        case .notZIP: return "输入数据不是 ZIP 文件"
         case .truncated(let at): return "ZIP 文件被截断（偏移 \(at)）"
         case .unsupportedCompressionMethod(let m, let n):
             return "不支持的压缩方法 \(m)（文件：\(n)），仅支持 0=stored / 8=deflate"
         case .unsupportedDataDescriptor(let n):
-            return "条目使用了 data descriptor（flag bit 3），暂不支持（文件：\(n)）。请重新打包 IPA。"
+            return "条目使用了 data descriptor（文件：\(n)）"
         case .inflateFailed(let n): return "deflate 解压失败（文件：\(n)）"
         case .crcMismatch(let n, let e, let a):
             return "CRC 校验失败（文件：\(n)）：期望 0x\(String(e, radix: 16))，实际 0x\(String(a, radix: 16))"
+        case .centralDirectoryNotFound: return "未找到 ZIP 中央目录"
+        case .noLocalFileHeader(let n): return "未找到 \(n) 的 local file header"
         }
     }
 }
 
 public struct ZIPEntry {
     public let filename: String
-    public let compressionMethod: UInt16     // 0=stored, 8=deflate
+    public let compressionMethod: UInt16
     public let uncompressedSize: UInt32
     public let crc32: UInt32
-    public let dataOffset: Int
+    public let dataOffset: Int          // 压缩数据在文件中的偏移
     public let compressedSize: UInt32
+    public let hasDataDescriptor: Bool
 }
 
 public struct ZIPReader {
     public let data: Data
 
     public init(data: Data) throws {
-        guard data.count >= 4,
-              data[0] == 0x50, data[1] == 0x4B, data[2] == 0x03, data[3] == 0x04 else {
+        guard data.count >= 22 else { throw ZIPReaderError.notZIP }
+        // ZIP 必须以 PK\x03\x04 开头（local file header）
+        guard data[0] == 0x50, data[1] == 0x4B, data[2] == 0x03, data[3] == 0x04 else {
             throw ZIPReaderError.notZIP
         }
         self.data = data
+        AppLog.shared.write("ZIPReader init: dataSize=\(data.count)")
     }
 
-    /// 扫描所有 local file header，返回条目清单
+    /// 通过 Central Directory 扫描所有条目（支持 data descriptor）
     public func listEntries() throws -> [ZIPEntry] {
+        AppLog.shared.write("listEntries: 开始扫描 Central Directory...")
+
+        // 1. 找 EOCD (End of Central Directory Record): signature 0x06054b50
+        //    EOCD 固定 22 字节，从文件末尾向前扫描
+        var eocdOffset = -1
+        let searchStart = data.count - 22
+        let searchEnd = Swift.max(0, data.count - 65557) // comment 最多 65535 字节
+        for i in stride(from: searchStart, through: searchEnd, by: -1) {
+            if data.readU32LE(at: i) == 0x06054b50 {
+                eocdOffset = i
+                break
+            }
+        }
+        guard eocdOffset >= 0 else {
+            AppLog.shared.write("listEntries: 未找到 EOCD")
+            throw ZIPReaderError.centralDirectoryNotFound
+        }
+        AppLog.shared.write("listEntries: EOCD at offset \(eocdOffset)")
+
+        // 2. 从 EOCD 读取 Central Directory 偏移和条目数
+        let cdCount = data.readU16LE(at: eocdOffset + 10) ?? 0
+        let cdSize = data.readU32LE(at: eocdOffset + 12) ?? 0
+        let cdOffset = data.readU32LE(at: eocdOffset + 16) ?? 0
+        AppLog.shared.write("listEntries: cdCount=\(cdCount), cdSize=\(cdSize), cdOffset=\(cdOffset)")
+
+        guard cdCount > 0 else { return [] }
+
+        // 3. 遍历 Central Directory entries
         var entries: [ZIPEntry] = []
-        var cursor = 0
-        while cursor + 30 <= data.count {
-            guard data[cursor] == 0x50, data[cursor+1] == 0x4B,
-                  data[cursor+2] == 0x03, data[cursor+3] == 0x04 else { break }
+        var cursor = Int(cdOffset)
+        for _ in 0..<Int(cdCount) {
+            guard cursor + 46 <= data.count else {
+                throw ZIPReaderError.truncated(at: cursor)
+            }
+            // Central Directory File Header signature 0x02014b50
+            guard data.readU32LE(at: cursor) == 0x02014b50 else { break }
 
-            let flags = data.readU16LE(at: cursor + 6) ?? 0
-            let method = data.readU16LE(at: cursor + 8) ?? 0
-            let crc = data.readU32LE(at: cursor + 14) ?? 0
-            let compSize = data.readU32LE(at: cursor + 18) ?? 0
-            let uncompSize = data.readU32LE(at: cursor + 22) ?? 0
-            let fnLen = Int(data.readU16LE(at: cursor + 26) ?? 0)
-            let extraLen = Int(data.readU16LE(at: cursor + 28) ?? 0)
+            let method = data.readU16LE(at: cursor + 10) ?? 0
+            let crc = data.readU32LE(at: cursor + 16) ?? 0
+            let compSize = data.readU32LE(at: cursor + 20) ?? 0
+            let uncompSize = data.readU32LE(at: cursor + 24) ?? 0
+            let fnLen = Int(data.readU16LE(at: cursor + 28) ?? 0)
+            let extraLen = Int(data.readU16LE(at: cursor + 30) ?? 0)
+            let commentLen = Int(data.readU16LE(at: cursor + 32) ?? 0)
+            let localHeaderOffset = Int(data.readU32LE(at: cursor + 42) ?? 0)
 
-            let nameStart = cursor + 30
-            guard nameStart + fnLen + extraLen <= data.count else {
+            let nameStart = cursor + 46
+            guard nameStart + fnLen <= data.count else {
                 throw ZIPReaderError.truncated(at: nameStart)
             }
             let nameData = data.subdata(in: nameStart..<(nameStart + fnLen))
@@ -115,29 +154,49 @@ public struct ZIPReader {
                 ?? String(data: nameData, encoding: .ascii)
                 ?? "<unreadable>"
 
-            // data descriptor：size/crc 在数据末尾，本实现不扫描
-            if (flags & 0x08) != 0 {
-                throw ZIPReaderError.unsupportedDataDescriptor(filename: filename)
-            }
+            // 跳到下一个 CD entry
+            cursor = nameStart + fnLen + extraLen + commentLen
 
-            let dataOffset = nameStart + fnLen + extraLen
+            // 跳过目录
+            if filename.hasSuffix("/") { continue }
+
+            // 从 local file header 获取实际数据偏移（dataOffset = localHeaderOffset + 30 + fnLen + extraLen）
+            guard localHeaderOffset + 30 <= data.count else {
+                AppLog.shared.write("listEntries: \(filename) local header 截断")
+                throw ZIPReaderError.truncated(at: localHeaderOffset)
+            }
+            guard data.readU32LE(at: localHeaderOffset) == 0x04034b50 else {
+                AppLog.shared.write("listEntries: \(filename) 未找到 local file header")
+                throw ZIPReaderError.noLocalFileHeader(filename: filename)
+            }
+            let localFnLen = Int(data.readU16LE(at: localHeaderOffset + 26) ?? 0)
+            let localExtraLen = Int(data.readU16LE(at: localHeaderOffset + 28) ?? 0)
+            let localFlags = data.readU16LE(at: localHeaderOffset + 6) ?? 0
+            let hasDataDescriptor = (localFlags & 0x08) != 0
+            let dataOffset = localHeaderOffset + 30 + localFnLen + localExtraLen
+
+            AppLog.shared.write("  entry: \(filename), method=\(method), compSize=\(compSize), uncompSize=\(uncompSize), hasDD=\(hasDataDescriptor), dataOffset=\(dataOffset)")
+
             entries.append(ZIPEntry(
                 filename: filename,
                 compressionMethod: method,
                 uncompressedSize: uncompSize,
                 crc32: crc,
                 dataOffset: dataOffset,
-                compressedSize: compSize
+                compressedSize: compSize,
+                hasDataDescriptor: hasDataDescriptor
             ))
-            cursor = dataOffset + Int(compSize)
         }
+
+        AppLog.shared.write("listEntries: 共 \(entries.count) 个条目")
         return entries
     }
 
-    /// 读取某条目解压后的数据，并校验 CRC32
+    /// 读取某条目解压后的数据
     public func readData(for entry: ZIPEntry) throws -> Data {
         let dataEnd = entry.dataOffset + Int(entry.compressedSize)
         guard dataEnd <= data.count else {
+            AppLog.shared.write("readData: \(entry.filename) 数据截断, dataEnd=\(dataEnd), data.count=\(data.count)")
             throw ZIPReaderError.truncated(at: entry.dataOffset)
         }
         let compData = data.subdata(in: entry.dataOffset..<dataEnd)
@@ -150,25 +209,23 @@ public struct ZIPReader {
                                              expectedSize: Int(entry.uncompressedSize),
                                              filename: entry.filename)
         default:
+            AppLog.shared.write("readData: \(entry.filename) 不支持的压缩方法 \(entry.compressionMethod)")
             throw ZIPReaderError.unsupportedCompressionMethod(
                 method: entry.compressionMethod, filename: entry.filename)
         }
+        // CRC 校验（data descriptor 时 CD 中的 crc 是正确的）
         let crc = crc32(of: out)
         if crc != entry.crc32 {
+            AppLog.shared.write("readData: \(entry.filename) CRC 不匹配, expected=0x\(String(entry.crc32, radix: 16)), actual=0x\(String(crc, radix: 16))")
             throw ZIPReaderError.crcMismatch(filename: entry.filename,
                                              expected: entry.crc32, actual: crc)
         }
         return out
     }
 
-    // MARK: - Deflate 解压（Compression.framework stream API）
+    // MARK: - Deflate 解压
 
-    /// 用 COMPRESSION_ZLIB stream 模式解 raw DEFLATE
     static func inflateRawDeflate(_ src: Data, expectedSize: Int, filename: String) throws -> Data {
-        AppLog.shared.write("inflateRawDeflate 开始: filename=\(filename), srcSize=\(src.count), expectedSize=\(expectedSize)")
-
-        // 修复: bitPattern 0 返回 nil，! 解包 nil 会崩溃。用 bitPattern 1 创建非 nil 哨兵指针，
-        // 这些指针在使用前会被 withUnsafeBytes 的真实指针覆盖，不会被解引用。
         var stream = compression_stream(
             dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 1)!,
             dst_size: 0,
@@ -177,7 +234,6 @@ public struct ZIPReader {
             state: nil
         )
         guard compression_stream_init(&stream, CS_OP_DECODE, CS_ALGO_ZLIB) != CS_STATUS_ERROR else {
-            AppLog.shared.write("inflateRawDeflate: compression_stream_init 失败")
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
@@ -195,19 +251,15 @@ public struct ZIPReader {
                 stream.dst_size = outRaw.count
                 let op = compression_stream_process(&stream, CS_FLAG_FINAL)
                 produced = outRaw.count - stream.dst_size
-                AppLog.shared.write("inflateRawDeflate: process 返回 \(op), produced=\(produced)")
                 return op == CS_STATUS_END
             }
         }
         if !ok {
-            AppLog.shared.write("inflateRawDeflate: 一次性解压失败，尝试扩容路径")
             return try inflateWithGrowingBuffer(src: src, initialSize: Swift.max(expectedSize, 64), filename: filename)
         }
-        AppLog.shared.write("inflateRawDeflate: 成功, produced=\(produced)")
         return output.prefix(produced)
     }
 
-    /// 扩容式解压：当一次性解压不够 buffer 时使用
     private static func inflateWithGrowingBuffer(src: Data, initialSize: Int, filename: String) throws -> Data {
         var stream = compression_stream(
             dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 1)!,
@@ -248,8 +300,7 @@ public struct ZIPReader {
                     switch op {
                     case CS_STATUS_END: done = true
                     case CS_STATUS_ERROR: error = true
-                    case CS_STATUS_OK:
-                        if stream.dst_size == 0 {}
+                    case CS_STATUS_OK: break
                     default: error = true
                     }
                 }
