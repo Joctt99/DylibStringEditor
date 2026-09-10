@@ -160,7 +160,13 @@ struct ContentView: View {
             .navigationTitle("Dylib 字符串编辑器")
             .fileImporter(
                 isPresented: $showFileImporter,
-                allowedContentTypes: [.data, .zip],
+                allowedContentTypes: [
+                    UTType("com.apple.itunes.ipa") ?? .archive,
+                    .archive,
+                    .zip,
+                    .data,
+                    .item
+                ],
                 allowsMultipleSelection: false
             ) { result in
                 handleImport(result)
@@ -195,9 +201,14 @@ struct ContentView: View {
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            guard let url = urls.first else { return }
-            let _ = url.startAccessingSecurityScopedResource()
-            defer { url.stopAccessingSecurityScopedResource() }
+            guard let url = urls.first else {
+                appModel.errorMessage = "未选择任何文件"
+                return
+            }
+            let didStart = url.startAccessingSecurityScopedResource()
+            defer {
+                if didStart { url.stopAccessingSecurityScopedResource() }
+            }
             do {
                 let data = try Data(contentsOf: url)
                 appModel.loadIPA(data, fileName: url.lastPathComponent)
@@ -205,6 +216,12 @@ struct ContentView: View {
                 appModel.errorMessage = "读取文件失败：\(error.localizedDescription)"
             }
         case .failure(let error):
+            // 用户在系统选择器里点了取消，会被报成 failure，不应该当错误
+            let nsError = error as NSError
+            if nsError.domain == NSCocoaErrorDomain,
+               nsError.code == NSUserCancelledError {
+                return
+            }
             appModel.errorMessage = "导入失败：\(error.localizedDescription)"
         }
     }
