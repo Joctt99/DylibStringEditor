@@ -13,7 +13,7 @@ final class AppModel: ObservableObject {
     @Published var isLoading = false
 
     /// 已修改的 dylib 数据缓存：zipPath -> modifiedData
-    private var modifiedDylibs: [String: Data] = [:]
+    private(set) var modifiedDylibs: [String: Data] = [:]
 
     func loadIPA(_ data: Data, fileName: String) {
         self.ipaData = data
