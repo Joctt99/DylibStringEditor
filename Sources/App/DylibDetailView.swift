@@ -180,9 +180,13 @@ final class DylibDetailViewModel: ObservableObject {
 
     /// 单条替换
     func replaceString(_ str: MachOString, with newVal: String, completion: @escaping (Bool, String?) -> Void) {
+        let current = modifiedData ?? originalData
+        guard let current = current else {
+            completion(false, "数据未加载")
+            return
+        }
         Task.detached(priority: .userInitiated) {
             do {
-                let current = self.modifiedData ?? self.originalData!
                 let ed = try MachOStringEditor(data: current)
                 let newData = try ed.applyReplacement(str.value, newVal)
                 await MainActor.run {
@@ -202,9 +206,13 @@ final class DylibDetailViewModel: ObservableObject {
 
     /// 批量替换
     func applyBatchReplace(_ replacements: [MachOReplacement], completion: @escaping (Bool, String?) -> Void) {
+        let current = modifiedData ?? originalData
+        guard let current = current else {
+            completion(false, "数据未加载")
+            return
+        }
         Task.detached(priority: .userInitiated) {
             do {
-                let current = self.modifiedData ?? self.originalData!
                 let ed = try MachOStringEditor(data: current)
                 let newData = try ed.applyReplacements(replacements)
                 await MainActor.run {
