@@ -1,0 +1,49 @@
+# xcodegen 配置：用命令 `xcodegen generate` 生成 Xcode 项目
+name: DylibStringEditor
+options:
+  bundleIdPrefix: com.trae.dylibstringeditor
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    SWIFT_VERSION: "5.9"
+    ENABLE_BITCODE: NO
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    EXPANDED_CODE_SIGN_IDENTITY: ""
+    EXPANDED_CODE_SIGN_IDENTITY_NAME: ""
+    SUPPORTS_MACCATALYST: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  DylibStringEditor:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: Dylib字符串编辑器
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+          UIImageName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: IPA
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - com.apple.itunes.ipa
+        LSSupportsOpeningDocumentsInPlace: true
+        UIFileSharingEnabled: true
+        UISupportsDocumentBrowser: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trae.dylibstringeditor
+    resources: []
