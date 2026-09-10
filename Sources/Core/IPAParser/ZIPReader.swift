@@ -1,13 +1,13 @@
 import Foundation
 import Compression
 
-// Compression framework 常量（Swift 未映射为枚举成员，用原始值）
-private let CS_OP_DECODE = Int32(1)       // COMPRESSION_STREAM_DECODE
-private let CS_ALGO_ZLIB = Int32(200)     // COMPRESSION_ZLIB
-private let CS_STATUS_ERROR = Int32(-1)   // COMPRESSION_STATUS_ERROR
-private let CS_STATUS_END = Int32(1)      // COMPRESSION_STATUS_END
-private let CS_STATUS_OK = Int32(0)       // COMPRESSION_STATUS_OK
-private let CS_FLAG_FINAL = Int32(1)      // COMPRESSION_STREAM_FINAL
+// Compression framework 常量（Swift 未映射为枚举成员，用 rawValue 构造）
+private let CS_OP_DECODE = compression_stream_operation(rawValue: 1)     // COMPRESSION_STREAM_DECODE
+private let CS_ALGO_ZLIB = compression_algorithm(rawValue: 200)          // COMPRESSION_ZLIB
+private let CS_STATUS_ERROR = compression_status(rawValue: -1)            // COMPRESSION_STATUS_ERROR
+private let CS_STATUS_END = compression_status(rawValue: 1)               // COMPRESSION_STATUS_END
+private let CS_STATUS_OK = compression_status(rawValue: 0)                // COMPRESSION_STATUS_OK
+private let CS_FLAG_FINAL = Int32(1)                                      // COMPRESSION_STREAM_FINAL
 
 // MARK: - ZIP 容器最小解析器
 //
