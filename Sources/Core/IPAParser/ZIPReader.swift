@@ -9,15 +9,43 @@ private let CS_STATUS_END = compression_status(rawValue: 1)               // COM
 private let CS_STATUS_OK = compression_status(rawValue: 0)                // COMPRESSION_STATUS_OK
 private let CS_FLAG_FINAL = Int32(1)                                      // COMPRESSION_STREAM_FINAL
 
+// MARK: - 持久化日志（写入 Documents/dylib_editor.log，可通过 Files app 查看）
+
+public final class AppLog {
+    public static let shared = AppLog()
+    private let queue = DispatchQueue(label: "applog.serial")
+    private lazy var logURL: URL = {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory
+        return docs.appendingPathComponent("dylib_editor.log")
+    }()
+
+    private init() {}
+
+    public func write(_ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(ts)] \(message)\n"
+        queue.sync {
+            if let data = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: logURL.path) {
+                    if let handle = try? FileHandle(forWritingTo: logURL) {
+                        _ = try? handle.seekToEnd()
+                        try? handle.write(contentsOf: data)
+                        try? handle.close()
+                    }
+                } else {
+                    try? data.write(to: logURL)
+                }
+            }
+        }
+        NSLog("%@", line.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public var logFilePath: String { logURL.path }
+}
+
 // MARK: - ZIP 容器最小解析器
-//
-// 仅支持：
-//   - Local file header (PK\x03\x04)
-//   - 压缩方法 0 (stored) / 8 (deflate)
-//   - COMPRESSION_ZLIB 解 raw DEFLATE（ZIP method 8）
-//
-// 不支持的特性（IPA 实际不会出现，遇到抛错）：
-//   - ZIP64 / 加密 / LZMA / Zstd / Data descriptor (flag bit 3)
 
 public enum ZIPReaderError: Error, CustomStringConvertible {
     case notZIP
@@ -67,7 +95,6 @@ public struct ZIPReader {
         var entries: [ZIPEntry] = []
         var cursor = 0
         while cursor + 30 <= data.count {
-            // local file header signature 0x04034b50
             guard data[cursor] == 0x50, data[cursor+1] == 0x4B,
                   data[cursor+2] == 0x03, data[cursor+3] == 0x04 else { break }
 
@@ -137,22 +164,24 @@ public struct ZIPReader {
     // MARK: - Deflate 解压（Compression.framework stream API）
 
     /// 用 COMPRESSION_ZLIB stream 模式解 raw DEFLATE
-    /// COMPRESSION_ZLIB 接受 raw DEFLATE 数据流（无 zlib header），正好对应 ZIP method 8
     static func inflateRawDeflate(_ src: Data, expectedSize: Int, filename: String) throws -> Data {
+        AppLog.shared.write("inflateRawDeflate 开始: filename=\(filename), srcSize=\(src.count), expectedSize=\(expectedSize)")
+
+        // 修复: 用 nil 初始化指针字段，不再用 UnsafeMutablePointer(bitPattern: 0)! 强制解包
+        // (UnsafePointer(bitPattern: 0) 返回 nil，! 解包 nil 会崩溃)
         var stream = compression_stream(
-            dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 0)!,
+            dst_ptr: nil,
             dst_size: 0,
-            src_ptr: UnsafePointer<UInt8>(bitPattern: 0)!,
+            src_ptr: nil,
             src_size: 0,
             state: nil
         )
         guard compression_stream_init(&stream, CS_OP_DECODE, CS_ALGO_ZLIB) != CS_STATUS_ERROR else {
+            AppLog.shared.write("inflateRawDeflate: compression_stream_init 失败")
             throw ZIPReaderError.inflateFailed(filename: filename)
         }
         defer { compression_stream_destroy(&stream) }
 
-        // 用 expected size 预分配；ZIP 里的 uncompressed size 字段总是可信的，所以一次就够
-        // 保险起见给 2 倍空间
         var output = Data(count: Swift.max(expectedSize * 2, 64))
         var produced = 0
 
@@ -166,22 +195,24 @@ public struct ZIPReader {
                 stream.dst_size = outRaw.count
                 let op = compression_stream_process(&stream, CS_FLAG_FINAL)
                 produced = outRaw.count - stream.dst_size
+                AppLog.shared.write("inflateRawDeflate: process 返回 \(op), produced=\(produced)")
                 return op == CS_STATUS_END
             }
         }
         if !ok {
-            // 预分配不够，走扩容路径
+            AppLog.shared.write("inflateRawDeflate: 一次性解压失败，尝试扩容路径")
             return try inflateWithGrowingBuffer(src: src, initialSize: Swift.max(expectedSize, 64), filename: filename)
         }
+        AppLog.shared.write("inflateRawDeflate: 成功, produced=\(produced)")
         return output.prefix(produced)
     }
 
     /// 扩容式解压：当一次性解压不够 buffer 时使用
     private static func inflateWithGrowingBuffer(src: Data, initialSize: Int, filename: String) throws -> Data {
         var stream = compression_stream(
-            dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 0)!,
+            dst_ptr: nil,
             dst_size: 0,
-            src_ptr: UnsafePointer<UInt8>(bitPattern: 0)!,
+            src_ptr: nil,
             src_size: 0,
             state: nil
         )
@@ -191,7 +222,6 @@ public struct ZIPReader {
         defer { compression_stream_destroy(&stream) }
 
         var output = Data(count: initialSize)
-        // 标记是否完成
         var done = false
         var error = false
         var produced = 0
@@ -205,7 +235,6 @@ public struct ZIPReader {
             stream.src_size = srcRaw.count
 
             while !done && !error {
-                // 每轮重新获取 output 的可变指针
                 output.withUnsafeMutableBytes { (outRaw: UnsafeMutableRawBufferPointer) in
                     guard let outBase = outRaw.bindMemory(to: UInt8.self).baseAddress else {
                         error = true
@@ -213,27 +242,21 @@ public struct ZIPReader {
                     }
                     stream.dst_ptr = outBase + produced
                     stream.dst_size = outRaw.count - produced
-                    if stream.dst_size == 0 {
-                        // 需要扩容
-                        return
-                    }
+                    if stream.dst_size == 0 { return }
                     let op = compression_stream_process(&stream, CS_FLAG_FINAL)
                     produced = outRaw.count - stream.dst_size
                     switch op {
                     case CS_STATUS_END: done = true
                     case CS_STATUS_ERROR: error = true
                     case CS_STATUS_OK:
-                        if stream.dst_size == 0 {
-                            // buffer 满，外层循环会扩容
-                        }
+                        if stream.dst_size == 0 {}
                     default: error = true
                     }
                 }
                 if !done && !error && produced >= output.count {
-                    // 扩容到 2 倍
                     let old = output.count
                     output.count = old * 2
-                    if output.count > 512 * 1024 * 1024 {  // 512MB 上限
+                    if output.count > 512 * 1024 * 1024 {
                         error = true
                     }
                 }
@@ -263,7 +286,6 @@ internal extension Data {
 }
 
 internal func crc32(of data: Data) -> UInt32 {
-    // 标准 CRC32 (zlib 多项式 0xEDB88320)
     var crc: UInt32 = 0xFFFFFFFF
     for byte in data {
         crc ^= UInt32(byte)

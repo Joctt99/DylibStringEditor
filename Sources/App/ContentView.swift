@@ -25,17 +25,22 @@ final class AppModel: ObservableObject {
         self.errorMessage = nil
         self.isLoading = true
         self.importDiag = "正在解析 IPA（\(data.count) 字节）..."
+        AppLog.shared.write("loadIPA 开始: fileName=\(fileName), dataSize=\(data.count)")
         let dataCopy = data
         Task.detached(priority: .userInitiated) {
             do {
+                AppLog.shared.write("创建 IPAParser...")
                 let parser = try IPAParser(data: dataCopy)
+                AppLog.shared.write("IPAParser 创建成功，开始 listMachOEntries...")
                 let list = try parser.listMachOEntries()
+                AppLog.shared.write("listMachOEntries 完成: 找到 \(list.count) 个 Mach-O")
                 await MainActor.run {
                     self.entries = list.sorted { $0.zipPath < $1.zipPath }
                     self.isLoading = false
                     self.importDiag = "解析完成：找到 \(list.count) 个 Mach-O"
                 }
             } catch {
+                AppLog.shared.write("解析失败: \(error.localizedDescription)")
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.isLoading = false
@@ -259,18 +264,21 @@ struct ContentView: View {
 
     private func handlePickedURL(_ url: URL) {
         appModel.importDiag = "已选文件: \(url.lastPathComponent)，开始后台读取..."
-        // 拷贝 URL 字符串，避免跨线程访问 URL 安全作用域问题
+        AppLog.shared.write("handlePickedURL: url=\(url.absoluteString), path=\(url.path)")
         let path = url.path
         let displayName = url.lastPathComponent
         Task.detached(priority: .userInitiated) {
             do {
                 let fileURL = URL(fileURLWithPath: path)
+                AppLog.shared.write("开始读取文件: \(path)")
                 let data = try Data(contentsOf: fileURL, options: [.uncached])
+                AppLog.shared.write("文件读取成功: \(data.count) 字节")
                 await MainActor.run {
                     appModel.importDiag = "读取成功：\(data.count) 字节，开始解析..."
                     appModel.loadIPA(data, fileName: displayName)
                 }
             } catch {
+                AppLog.shared.write("文件读取失败: \(error.localizedDescription)")
                 await MainActor.run {
                     appModel.importDiag = "读取失败: \(error.localizedDescription)"
                     appModel.errorMessage = "读取文件失败：\(error.localizedDescription)"
